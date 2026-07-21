@@ -23,8 +23,8 @@ need [Aladin Desktop](https://aladin.cds.unistra.fr/java/nph-aladin.pl?frame=dow
 and a Java runtime.
 
 ```bash
-git clone https://github.com/<you>/aladin-charts.git
-cd aladin-charts
+git clone https://github.com/helmet-png/aladin-mcp.git
+cd aladin-mcp
 python aladin_cli.py chart M31 --fov 1.5
 ```
 
