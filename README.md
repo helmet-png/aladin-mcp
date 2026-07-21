@@ -18,9 +18,11 @@ catalog data drawn on top.
 
 ## Install
 
-Requires Python 3.8+ (no third-party packages). For the second engine you also
-need [Aladin Desktop](https://aladin.cds.unistra.fr/java/nph-aladin.pl?frame=downloading)
-and a Java runtime.
+Requires Python 3.8+ (no third-party packages). Works on Windows, macOS and
+Linux, on any CPU architecture. For the second engine you also need
+[Aladin Desktop](https://aladin.cds.unistra.fr/java/nph-aladin.pl?frame=downloading)
+and a Java runtime — install those from CDS yourself; this repository ships no
+Aladin binaries.
 
 ```bash
 git clone https://github.com/helmet-png/aladin-mcp.git
@@ -106,12 +108,21 @@ cached tiles that make a warm session fast — it roughly triples render time.
 Instead the catalog planes get fixed names and only those are removed, leaving
 image planes (and their caches) in place.
 
-**Use a native JVM and a class-sharing archive.** Aladin ships an x64 JRE, which
-runs emulated on ARM64 machines (Apple Silicon under Rosetta, Snapdragon X on
-Windows). `Aladin-Fast.bat` launches the same jar on a native JVM, raises the
-heap limit, and builds an AppCDS archive on first run (~6.1 s → ~4.6 s startup;
-the gain is limited because Aladin.jar is signed, so only JDK classes can be
-archived).
+**Launch Aladin on your own JVM.** `Aladin-Fast.bat` (Windows) and
+`aladin-fast.sh` (macOS, Linux) run the same jar on whatever JVM is on your
+PATH, with a larger heap and an AppCDS archive built on first run
+(~6.1 s → ~4.6 s startup; the gain is limited because Aladin.jar is signed, so
+only JDK classes can be archived).
+
+This matters most on ARM64 machines. Aladin bundles an **x64** JRE, so on Apple
+Silicon or Snapdragon X it runs emulated — measured 2.9x slower at rendering
+than a native JVM, and much less consistent (21–70 s versus 11–17 s for the same
+work). On an x64 machine the bundled JRE is already native, so expect only the
+heap and startup gains.
+
+Nothing here is architecture-specific: `Aladin.jar` is pure Java bytecode with no
+native libraries, the launchers detect whatever JVM you have, and this repository
+ships no Aladin binaries at all.
 
 ## Gotchas
 
@@ -155,9 +166,10 @@ MIT licensed.
 
 ## 安裝
 
-需要 Python 3.8+（無第三方套件）。第二個引擎另需
+需要 Python 3.8+（無第三方套件）。Windows、macOS、Linux 都能用，不限 CPU 架構。
+第二個引擎另需
 [Aladin Desktop](https://aladin.cds.unistra.fr/java/nph-aladin.pl?frame=downloading)
-與 Java。
+與 Java——請自行從 CDS 安裝，本倉庫不含任何 Aladin 執行檔。
 
 `Aladin.jar` 會自動在常見安裝路徑尋找。裝在別處的話用環境變數 `ALADIN_JAR` 指定；
 `JAVA_BIN` 指定 JVM，`ALADIN_OUT` 改輸出資料夾。
@@ -217,10 +229,18 @@ claude mcp add aladin -- python /path/to/mcp_server.py
 **不要清空圖層堆疊。** 在兩張圖之間下 `rm all`，丟掉的正是讓熱 session 變快的那份快取，
 算圖時間會變成約三倍。改成只給目錄圖層固定名稱、只刪那些，影像圖層（與其快取）保留。
 
-**用原生 JVM 加類別共享存檔。** Aladin 自帶 x64 JRE，在 ARM64 機器上（Apple Silicon
-走 Rosetta、Windows 的 Snapdragon X）是模擬執行。`Aladin-Fast.bat` 改用原生 JVM 啟動、
-提高記憶體上限，並在首次執行時建立 AppCDS 存檔（啟動 6.1 秒 → 4.6 秒；因為 Aladin.jar
-有簽章、自身類別無法進存檔，增益有限）。
+**用自己的 JVM 啟動 Aladin。** `Aladin-Fast.bat`（Windows）與 `aladin-fast.sh`
+（macOS、Linux）用你 PATH 上的 JVM 跑同一個 jar，加大記憶體上限，並在首次執行時
+建立 AppCDS 存檔（啟動 6.1 秒 → 4.6 秒；因為 Aladin.jar 有簽章、自身類別無法進存檔，
+增益有限）。
+
+**這對 ARM64 機器差別最大。** Aladin 自帶的是 **x64** JRE，在 Apple Silicon 或
+Snapdragon X 上是模擬執行——實測渲染慢 2.9 倍，而且穩定性差很多（同樣的工作
+21–70 秒 vs 11–17 秒）。x64 機器上自帶的 JRE 本來就是原生的，所以只會拿到記憶體
+與啟動速度的好處。
+
+這裡沒有任何架構相依的東西：`Aladin.jar` 是純 Java bytecode、不含原生程式庫，
+啟動器會偵測你自己的 JVM，而本倉庫完全不含任何 Aladin 執行檔。
 
 ## 陷阱
 
