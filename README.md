@@ -45,6 +45,9 @@ python aladin_cli.py chart "0,0" --fov 360 --projection AIT --survey mellinger
 python aladin_cli.py aladin M45 --fov 1.5 --catalog simbad --grid
 python aladin_cli.py aladin M13 --catalog I/355/gaiadr3             # Gaia DR3
 
+# Several charts in one resident Aladin — roughly 3x faster than one call each
+python aladin_cli.py batch M31 M51 M13 --fov 0.5 --grid
+
 # Raw Aladin script passthrough — contours, RGB, crossmatch, anything
 python aladin_cli.py script "get hips(CDS/P/DSS2/red) M1 20arcmin; sync; contour 8; save -png 800x600 /tmp/m1.png"
 
@@ -81,18 +84,43 @@ Or in `claude_desktop_config.json`:
 Note that browser-based clients cannot reach a local MCP server — they accept
 remote URLs only. Desktop clients work fine.
 
-## Running Aladin on a native JVM
+## Performance
 
-Aladin Desktop ships with an x64 JRE. On ARM64 machines (Apple Silicon under
-Rosetta, Snapdragon X on Windows) that JRE runs emulated. `Aladin-Fast.bat`
-launches the same jar on whatever native JVM is on your PATH and raises the heap
-limit. Measured ~15% faster on batch rendering, with a larger difference on
-interactive panning and zooming, which is CPU-bound.
+Where the time goes on a cold `aladin_chart` call, measured on Windows/ARM64:
+
+| Stage | Cost |
+|---|---|
+| JVM startup | 0.2 s |
+| Aladin class loading and init | ~6 s |
+| Resolving the survey and fetching tiles | the rest, network-bound |
+
+Three things follow from that, all of which this repo does:
+
+**Keep Aladin resident.** The MCP server holds one Aladin process for its
+lifetime, and the CLI's `batch` command does the same. A warm session skips
+startup *and* keeps the resolved HiPS registry and tile cache in memory:
+measured 15.7 s for the first chart, then 5.3 s and 5.1 s.
+
+**Don't clear the plane stack.** `rm all` between charts throws away exactly the
+cached tiles that make a warm session fast — it roughly triples render time.
+Instead the catalog planes get fixed names and only those are removed, leaving
+image planes (and their caches) in place.
+
+**Use a native JVM and a class-sharing archive.** Aladin ships an x64 JRE, which
+runs emulated on ARM64 machines (Apple Silicon under Rosetta, Snapdragon X on
+Windows). `Aladin-Fast.bat` launches the same jar on a native JVM, raises the
+heap limit, and builds an AppCDS archive on first run (~6.1 s → ~4.6 s startup;
+the gain is limited because Aladin.jar is signed, so only JDK classes can be
+archived).
 
 ## Gotchas
 
 - **An Aladin script whose last line has no trailing newline hangs forever** —
   the process never exits and must be killed. `run_aladin_script()` appends one.
+- **Overlays and the grid persist across charts in a resident session.** Every
+  chart script therefore removes the named overlay planes and sets `grid on|off`
+  explicitly rather than assuming a clean slate — otherwise a chart that asked
+  for no catalog still shows the previous chart's markers.
 - `save` paths inside Aladin scripts must be absolute, with forward slashes.
 - Aladin's log output contains non-ASCII characters that crash legacy Windows
   console codepages; the CLI forces UTF-8.
@@ -147,6 +175,9 @@ python aladin_cli.py chart "0,0" --fov 360 --projection AIT --survey mellinger  
 python aladin_cli.py aladin M45 --fov 1.5 --catalog simbad --grid
 python aladin_cli.py aladin M13 --catalog I/355/gaiadr3             # 疊 Gaia DR3
 
+# 一個常駐程序連續出多張圖（約快 3 倍）
+python aladin_cli.py batch M31 M51 M13 --fov 0.5 --grid
+
 # 原生腳本直通（等高線、RGB、crossmatch⋯⋯）
 python aladin_cli.py script "get hips(CDS/P/DSS2/red) M1 20arcmin; sync; contour 8; save -png 800x600 /tmp/m1.png"
 
@@ -167,16 +198,37 @@ claude mcp add aladin -- python /path/to/mcp_server.py
 
 注意瀏覽器版的客戶端接不到本機 MCP（只接受遠端 URL），桌面版才可以。
 
-## 讓 Aladin 跑更快
+## 效能
 
-Aladin 自帶 x64 的 JRE。在 ARM64 機器上（Apple Silicon 走 Rosetta、Windows 的
-Snapdragon X）那個 JRE 是模擬執行的。`Aladin-Fast.bat` 改用 PATH 上的原生 JVM
-啟動同一個 jar，並提高記憶體上限。實測批次算圖快約 15%，互動平移縮放（純 CPU）差距更大。
+冷啟動一次 `aladin_chart` 的時間分佈（Windows/ARM64 實測）：
+
+| 階段 | 耗時 |
+|---|---|
+| JVM 啟動 | 0.2 秒 |
+| Aladin 類別載入與初始化 | 約 6 秒 |
+| 解析巡天、下載影像磚 | 其餘，取決於網路 |
+
+由此得到三個對策，本專案都做了：
+
+**讓 Aladin 常駐。** MCP 伺服器在生命週期內只開一個 Aladin，CLI 的 `batch` 指令同理。
+熱的 session 不只省下啟動時間，解析好的 HiPS 註冊表與影像磚也還在記憶體裡：
+實測第一張 15.7 秒，之後 5.3 秒、5.1 秒。
+
+**不要清空圖層堆疊。** 在兩張圖之間下 `rm all`，丟掉的正是讓熱 session 變快的那份快取，
+算圖時間會變成約三倍。改成只給目錄圖層固定名稱、只刪那些，影像圖層（與其快取）保留。
+
+**用原生 JVM 加類別共享存檔。** Aladin 自帶 x64 JRE，在 ARM64 機器上（Apple Silicon
+走 Rosetta、Windows 的 Snapdragon X）是模擬執行。`Aladin-Fast.bat` 改用原生 JVM 啟動、
+提高記憶體上限，並在首次執行時建立 AppCDS 存檔（啟動 6.1 秒 → 4.6 秒；因為 Aladin.jar
+有簽章、自身類別無法進存檔，增益有限）。
 
 ## 陷阱
 
 - **腳本最後一行沒有換行，Aladin 會無限卡死**，程序不退出、得強制終止。
   `run_aladin_script()` 已自動補上。
+- **常駐 session 裡，疊加層與網格會殘留到下一張圖。** 所以每段腳本都會先刪掉具名的
+  疊加層、並明確設定 `grid on|off`，不能假設是乾淨狀態——否則「沒要求目錄」的圖上
+  會出現前一張的標記。
 - 腳本裡 `save` 的路徑要用絕對路徑加正斜線。
 - Aladin 的 log 含非 ASCII 字元，舊版 Windows 主控台編碼會炸；CLI 已強制 UTF-8。
 

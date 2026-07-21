@@ -8,6 +8,7 @@ Desktop headless mode. Register with:
 or in claude_desktop_config.json:
   "aladin": {"command": "python", "args": ["/path/to/mcp_server.py"]}
 """
+import atexit
 import base64
 import json
 import sys
@@ -17,6 +18,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import aladin_cli
 
 MAX_INLINE_IMAGE = 1_500_000  # bytes; larger images returned as path only
+
+# One resident Aladin for the life of the server: the first aladin_chart call
+# pays startup, later ones are several times faster.
+SESSION = aladin_cli.AladinSession()
 
 TOOLS = [
     {
@@ -94,7 +99,7 @@ def call_tool(name, args):
         out, _ = aladin_cli.make_aladin_chart(
             args["target"], args.get("fov", 1.0), args.get("survey", "dss"),
             args.get("catalogs"), args.get("grid", False),
-            args.get("width", 1000), args.get("height", 750))
+            args.get("width", 1000), args.get("height", 750), session=SESSION)
         return image_result(out)
     if name == "aladin_script":
         rc, log = aladin_cli.run_aladin_script(
@@ -152,4 +157,5 @@ def main():
 
 
 if __name__ == "__main__":
+    atexit.register(SESSION.close)
     main()

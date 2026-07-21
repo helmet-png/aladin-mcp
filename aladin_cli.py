@@ -148,23 +148,108 @@ def run_aladin_script(script, timeout=300):
     return p.returncode, p.stdout.decode("utf-8", errors="replace")
 
 
-def make_aladin_chart(target, fov=1.0, survey="dss", catalog=None, grid=False,
-                      width=1200, height=900, out=None):
-    """Aladin chart with optional catalog overlay and coordinate grid."""
-    out = Path(out).resolve() if out else default_out(target, "png")
+MAX_OVERLAYS = 8
+OVERLAY_NAMES = [f"_ovl{i}" for i in range(MAX_OVERLAYS)]
+
+
+def chart_script(target, fov, survey, catalog, grid, width, height, out):
+    """Build the Aladin script that renders one chart to `out`.
+
+    Catalog planes are given fixed names so a resident session can drop just
+    those before the next chart. Image planes are deliberately left alone --
+    they hold the cached tiles that make a warm session fast.
+    """
     radius = f"{fov * 60:g}arcmin"
-    lines = [f"get hips({resolve_survey(survey)}) {target} {radius}", "sync"]
-    for cat in (catalog or []):
-        if cat.lower() == "simbad":
-            lines.append(f"get Simbad {target} {radius}")
-        else:
-            lines.append(f"get VizieR({cat}) {target} {radius}")
+    catalog = (catalog or [])[:MAX_OVERLAYS]
+    # Overlays and the grid persist across charts in a resident session, so
+    # clear them explicitly rather than assuming a clean slate.
+    lines = [f"rm {n}" for n in OVERLAY_NAMES]
+    lines += [f"get hips({resolve_survey(survey)}) {target} {radius}", "sync"]
+    for i, cat in enumerate(catalog):
+        src = "Simbad" if cat.lower() == "simbad" else f"VizieR({cat})"
+        lines.append(f"{OVERLAY_NAMES[i]} = get {src} {target} {radius}")
         lines.append("sync")
-    if grid:
-        lines.append("grid on")
+    lines.append("grid on" if grid else "grid off")
     lines += [f"zoom {fov:g} deg", "sync",
-              f"save -png {width}x{height} {out.as_posix()}", "quit"]
-    rc, log = run_aladin_script("\n".join(lines))
+              f"save -png {width}x{height} {out.as_posix()}"]
+    return lines
+
+
+class AladinSession:
+    """A resident headless Aladin process.
+
+    Starting Aladin costs ~5 s of JVM and class loading before any work
+    happens, and a fresh process also throws away the resolved HiPS registry
+    and the in-memory tile cache. Keeping one process alive across charts
+    turns a ~16 s render into ~3-6 s. Completion is detected by watching for
+    the output file, since Aladin's console output is not a reliable signal.
+    """
+
+    def __init__(self):
+        self.proc = None
+
+    def _alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def start(self):
+        if self._alive():
+            return
+        java = os.environ.get("JAVA_BIN") or shutil.which("java")
+        if not java:
+            raise FileNotFoundError("java not found on PATH; set JAVA_BIN.")
+        self.proc = subprocess.Popen(
+            [java, "-jar", find_aladin_jar(), "-nogui", "-script"],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, bufsize=0)
+
+    def render(self, lines, out, timeout=300):
+        """Run a script ending in `save <out>`; wait for the file to appear."""
+        out = Path(out)
+        if out.exists():
+            out.unlink()
+        self.start()
+        script = "\n".join(lines) + "\nsync\n"
+        try:
+            self.proc.stdin.write(script.encode("utf-8"))
+            self.proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            self.close()          # process died; retry once on a fresh one
+            self.start()
+            self.proc.stdin.write(script.encode("utf-8"))
+            self.proc.stdin.flush()
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not self._alive():
+                raise RuntimeError("Aladin exited unexpectedly while rendering.")
+            if out.exists() and out.stat().st_size > 0:
+                time.sleep(0.4)   # let the write finish
+                return out
+            time.sleep(0.2)
+        raise TimeoutError(f"Aladin did not produce {out} within {timeout}s.")
+
+    def close(self):
+        if self._alive():
+            try:
+                self.proc.stdin.write(b"quit\n")
+                self.proc.stdin.flush()
+                self.proc.wait(timeout=15)
+            except Exception:
+                self.proc.kill()
+        self.proc = None
+
+
+def make_aladin_chart(target, fov=1.0, survey="dss", catalog=None, grid=False,
+                      width=1200, height=900, out=None, session=None):
+    """Aladin chart with optional catalog overlay and coordinate grid.
+
+    Pass a live `session` to reuse a resident Aladin and skip startup cost.
+    """
+    out = Path(out).resolve() if out else default_out(target, "png")
+    lines = chart_script(target, fov, survey, catalog, grid, width, height, out)
+    if session is not None:
+        return session.render(lines, out), ""
+    rc, log = run_aladin_script("\n".join(lines + ["quit"]))
     if not out.exists():
         raise RuntimeError(f"Aladin did not produce {out}\n--- log ---\n{log[-2000:]}")
     return out, log
@@ -196,6 +281,15 @@ def main():
     a.add_argument("--height", type=int, default=900)
     a.add_argument("--out")
 
+    b = sub.add_parser("batch", help="several Aladin charts in one resident process (much faster)")
+    b.add_argument("targets", nargs="+")
+    b.add_argument("--fov", type=float, default=1.0)
+    b.add_argument("--survey", default="dss")
+    b.add_argument("--catalog", action="append")
+    b.add_argument("--grid", action="store_true")
+    b.add_argument("--width", type=int, default=1200)
+    b.add_argument("--height", type=int, default=900)
+
     s = sub.add_parser("script", help="run raw Aladin script (';' or newlines)")
     s.add_argument("commands", nargs="?", help="script text; omit to use --file")
     s.add_argument("--file", help="read script from file")
@@ -212,6 +306,16 @@ def main():
         out, _ = make_aladin_chart(ns.target, ns.fov, ns.survey, ns.catalog,
                                    ns.grid, ns.width, ns.height, ns.out)
         print(out)
+    elif ns.cmd == "batch":
+        session = AladinSession()
+        try:
+            for t in ns.targets:
+                out, _ = make_aladin_chart(t, ns.fov, ns.survey, ns.catalog,
+                                           ns.grid, ns.width, ns.height,
+                                           session=session)
+                print(out, flush=True)
+        finally:
+            session.close()
     elif ns.cmd == "script":
         text = Path(ns.file).read_text(encoding="utf-8") if ns.file else ns.commands
         if not text:
